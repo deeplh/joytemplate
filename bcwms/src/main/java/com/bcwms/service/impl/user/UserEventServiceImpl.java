@@ -1,0 +1,369 @@
+package com.bcwms.service.impl.user;
+
+
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONObject;
+import com.bcwms.BcwConstant;
+
+import com.bcwms.entity.*;
+import com.bcwms.properties.BcwProperties;
+import com.bcwms.security.BcwUser;
+import com.bcwms.security.BcwUserHolder;
+import com.bcwms.service.BcwCommonService;
+import com.bcwms.service.impl.ExamServiceImpl;
+import com.bcwms.service.impl.crew.CrewTermServiceImpl;
+
+import com.keepjoy.core.dao.KeepJoyDaoImpl;
+import com.keepjoy.core.exception.KeepJoyServiceException;
+import com.keepjoy.core.util.DateUtil;
+import org.apache.commons.lang.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.Date;
+import java.util.List;
+
+@Service
+@Transactional(rollbackFor=Exception.class)
+public class UserEventServiceImpl {
+    @Autowired
+    private KeepJoyDaoImpl dao;
+
+    @Autowired
+    private CrewTermServiceImpl crewTermService;
+
+    @Autowired
+    private ExamServiceImpl examService;
+
+//    @Autowired
+//    private BlockChainService blockChainService;
+
+    /***
+     *
+     * 活动现场签到
+     * 可以自己签到,也可以管理员帮忙签到
+     * @param userEventRelationId
+     */
+    public void sign(Integer userEventRelationId) throws Exception {
+
+        TblDanceUserEventRelation t = dao.get(TblDanceUserEventRelation.class, userEventRelationId);
+        if (null==t) {
+            throw new KeepJoyServiceException("userEventRelationId数据异常");
+        }
+        TblDanceEvent e=dao.get(TblDanceEvent.class,t.getEventId());
+        if(null==e){
+            throw new KeepJoyServiceException("数据异常");
+        }
+
+
+        if(null!=t.getSignDateTime()){
+            throw new KeepJoyServiceException("请勿重复签到");
+        }
+        Integer userId=BcwUserHolder.getDanceUser().getUserId();
+        t.setStatus(BcwConstant.STATUS_2_YES);
+        t.setSignDateTime(BcwCommonService.getNow());
+        t.setUpdateUserId(userId);
+        t.setUpdateDateTime(t.getSignDateTime());
+        dao.update(t);
+
+
+        if(TblDanceEvent.EVENTTYPE_1_GROUP_EXAM.equals(e.getEventType())){//考团
+            TblDanceCrewTerm ct=dao.findObjectFromListByHql(TblDanceCrewTerm.class,
+                    "from TblDanceCrewTerm where eventId=? ",e.getId());
+            if(null==ct)throw new KeepJoyServiceException("考团周期不存在");
+
+            TblDanceCrewTermUserDetail d=new TblDanceCrewTermUserDetail();
+            d.setUserId(t.getUserId());
+            d.setCrewId(ct.getCrewId());
+            d.setEventId(t.getEventId());
+            d.setCrewTermId(ct.getId());
+            d.setCrewUserType(TblDanceCrewTermUserDetail.CREWUSERTYPE_2_MEMBER);
+            d.setCreateDateTime(t.getSignDateTime());
+            d.setCreateUserId(userId);
+            d.setStatus(BcwConstant.STATUS_0_ING);
+            dao.save(d);
+
+        }else if(TblDanceEvent.EVENTTYPE_9_PERFORMANCE.equals(e.getEventType())){//商演
+            this.selectUser(new Integer[]{t.getUserId()},e.getId());
+        }
+    }
+
+
+    /**
+     * 申请加入活动
+     * @param eventId
+     * @throws Exception
+     */
+    public void applyEventMe(Integer eventId) throws Exception {
+        TblDanceEvent tde=dao.get(TblDanceEvent.class,eventId);
+        if(null==tde)throw new KeepJoyServiceException("eventId数据异常");
+
+        TblDanceUser u=BcwUserHolder.getDanceUser().getDanceUserInfo();
+        Integer userId=u.getUserId();
+
+        if(StringUtils.isEmpty(u.getAka())){
+            throw new KeepJoyServiceException("请先在我的信息中完善aka");
+        }
+
+        TblDanceUserEventRelation t=dao.findObjectFromListByHql(TblDanceUserEventRelation.class,
+                " from TblDanceUserEventRelation where eventId=? and userId=? " +
+                        " and (status=? or status=?) ",
+                eventId,BcwUserHolder.getDanceUser().getUserId(),
+                BcwConstant.STATUS_0_ING,BcwConstant.STATUS_2_YES);
+        if(null!=t)throw new KeepJoyServiceException("请勿重复申请");
+
+        t=new TblDanceUserEventRelation();
+        t.setEventId(eventId);
+        t.setUserId(userId);
+        t.setCreateDateTime(BcwCommonService.getNow());
+        t.setStatus(BcwConstant.STATUS_0_ING);
+        t.setCreateUserId(userId);
+        dao.save(t);
+
+    }
+
+
+    /**
+     * 审批创建的活动,根据不同的类型,存入到不同的表中
+     * 审批成功后上链
+     * @param id
+     * @param status
+     * @throws Exception
+     */
+    public void approveCreateEvent(Integer id,String status) throws Exception {
+        TblDanceEvent t=dao.get(TblDanceEvent.class,id);
+
+        if(null==t)throw new KeepJoyServiceException("id数据异常");
+        if(!BcwConstant.STATUS_0_ING.equals(t.getStatus())){
+            throw new KeepJoyServiceException("状态异常");
+        }
+
+        BcwUser user=BcwUserHolder.getDanceUser();
+        if(TblDanceEvent.EVENTTYPE_1_GROUP_EXAM.equals(t.getEventType())){//团训
+            TblDanceCrewTerm term=new TblDanceCrewTerm();
+            term.setCrewId(t.getFounderId());
+            term.setEventId(t.getId());
+            term.setExamBeginTime(t.getBeginTime());
+            term.setExamDate(t.getStageDate());
+            term=crewTermService.create(term);
+            t.setFounderType(TblDanceEvent.FOUNDERTYPE_2_CREW);
+
+            TblDanceExam exam=new TblDanceExam();
+            exam.setEventId(t.getId());
+            exam.setExamBeginTime(t.getBeginTime());
+            exam.setExamDate(t.getStageDate());
+            exam.setExamType(BcwConstant.TYPE_CREW_TERM);
+            exam.setStatus(BcwConstant.STATUS_2_YES);
+            exam=examService.create(exam);
+
+            term.setExamId(exam.getId());
+            dao.update(term);
+        }
+
+        t.setStatus(status);
+        t.setApproveDateTime(BcwCommonService.getNow());
+        t.setApproveUserId(user.getUserId());
+        if(null==t.getFounderType()){
+            t.setFounderType(TblDanceEvent.FOUNDERTYPE_1_USER);
+            t.setFounderId(user.getUserId());
+        }
+        dao.update(t);
+
+
+//        //上链逻辑
+//        TradeInfo tradeInfo = new TradeInfo();
+//        tradeInfo.setCity(t.getCity());
+//        tradeInfo.setActivityAddress(t.getAddress());
+//        tradeInfo.setApplyEndTime(DateUtil.dateToStringByDateFormat(t.getApplyEndTime(),"hh:mm"));
+//        tradeInfo.setStageDate(DateUtil.dateToStringByDateFormat(t.getStageDate()));
+//
+//        PerformanceTradeVO vo=new PerformanceTradeVO();
+//        vo.setFounderId(t.getFounderId()).setFounderType(t.getFounderType()).
+//                setName(t.getName()).setTradeInfo(tradeInfo).
+//                setSeqNo(BcwCommonService.getChainSeqNo(BcwConstant.TYPE_EVENT,t.getId()));
+//
+//        blockChainService.doBlockChain(t,vo ,"createNewPerformanceTrade");
+    }
+
+
+    /**
+     * 发起方选择活动对应角色人员-比如:比赛的裁判,工作人员等,商演的参演人员等
+     */
+    public void selectUser(Integer[] userIds,Integer eventId) throws Exception {
+        BcwUser user=BcwUserHolder.getDanceUser();
+        Date now=BcwCommonService.getNow();
+
+        TblDanceEvent e=dao.get(TblDanceEvent.class,eventId);
+        if(null==e){
+            throw new KeepJoyServiceException("eventId格式异常");
+        }
+        if(userIds.length>e.getMaxPersonNum()){
+            throw new KeepJoyServiceException("超出活动最大人数");
+        }
+
+        long esSize=dao.findObjectFromListByHql(Long.class,
+                "select count(id) from TblDanceUserEventRelation where eventId=? ",eventId);
+
+        if(esSize>=e.getMaxPersonNum()){
+            throw new KeepJoyServiceException("已超过最大报名人数");
+        }
+
+
+        for(Integer userId : userIds){
+
+            long l=dao.findObjectFromListByHql(Long.class,
+                    "select count(id) from TblDanceUserEventResult where eventId=? and userId=? ",eventId,userId);
+            if(l>0){
+                throw new KeepJoyServiceException("请勿重复选择参演人员");
+            }
+
+            TblDanceUserEventResult r=new TblDanceUserEventResult();
+            r.setEventId(eventId);
+            r.setUserId(userId);
+            r.setCreateUserId(user.getUserId());
+            r.setCreateDateTime(now);
+            r.setStatus(BcwConstant.STATUS_2_YES);
+            r.setFounderConfirm(BcwConstant.CONFIRM_0_NOT);
+            r.setUserConfirm(BcwConstant.CONFIRM_0_NOT);
+            dao.save(r);
+
+//            //上链接口
+//            PerformanceTradePickDancerReq d=new PerformanceTradePickDancerReq();
+//            d.setDancerId(userId).setContractAddress(e.getContractAddress())
+//                    .setSeqNo(BcwCommonService.getChainSeqNo(BcwConstant.TYPE_EVENT_RESULT,r.getId()));
+//
+//
+//            blockChainService.doBlockChain(r,d,"pickDancers");
+
+//            CommonGetReq cgr=new CommonGetReq();
+//            cgr.setContractAddress(e.getContractAddress()).
+//                    setSeqNo(d.getSeqNo());
+//            BoogieClient c = new BoogieClient(BcwProperties.getBlockchainUrl());
+//            CommonDataResponse t=c.getPickedDancers(cgr);
+//            blockChainService.doBlockChainWithGet(r,d,"pickDancers",
+//                    cgr,"getPickedDancers");
+
+        }
+    }
+
+    /**
+     * 参演用户确认评论
+     * @param eventId
+     * @param userComment
+     */
+    public void userConfirm(Integer eventId,String userComment,Integer userScore) throws Exception {
+        BcwUser user=BcwUserHolder.getDanceUser();
+        Date now=BcwCommonService.getNow();
+
+
+        TblDanceUserEventRelation er=dao.findObjectFromListByHql(TblDanceUserEventRelation.class,
+                "from TblDanceUserEventRelation where eventId=? and userId=? ",eventId,user.getUserId());
+        if(null==er){
+            throw new KeepJoyServiceException("数据异常");
+        }
+        er.setStatus(BcwConstant.STATUS_4_END);
+        er.setSettleDateTime(now);
+        dao.update(er);
+
+        TblDanceUserEventResult r=dao.findObjectFromListByHql(TblDanceUserEventResult.class,
+                "from TblDanceUserEventResult where eventId=? and userId=? ",eventId,user.getUserId());
+        if(null==r){
+           throw new KeepJoyServiceException("数据异常");
+        }
+
+
+        r.setUpdateDateTime(now);
+        r.setUpdateUserId(user.getUserId());
+        r.setUserConfirm(BcwConstant.CONFIRM_1_ED);
+        r.setUserConfirmDateTime(now);
+
+        //暂时不需要
+//        TblDanceUserEventComment c=new TblDanceUserEventComment();
+//        c.setEventId(r.getEventId());
+//        c.setComment(r.getUserComment());
+//        c.setCreateDateTime(now);
+//        c.setCreateUserId(user.getUserId());
+//        c.setUserId(user.getUserId());
+//        c.setUserType(TblDanceUserEventComment.USERTYPE_1_USER);
+//        c.setScore(userScore);
+
+//        //上链
+//        TradeComment tc=new TradeComment();
+//
+//        if(null!=userScore){
+//            r.setUserScore(userScore);
+//            tc.setCommentScore(userScore.toString());
+//        }
+//        if(StringUtils.isNotEmpty(userComment)){
+//            r.setUserComment(userComment);
+//            r.setUserCommentDateTime(now);
+//
+//            tc.setComment(userComment);
+//            tc.setCommentTime(DateUtil.dateToStringByDateFormat(now,DateUtil.DATEFORMAT_YYYY_MM_DD_HH_MM_SS));
+//        }
+//        dao.update(r);
+//
+//        TblDanceEvent eve=dao.get(TblDanceEvent.class,r.getEventId());
+//
+//        AssessmentVO v=new AssessmentVO();
+//        v.setAssessmentId(r.getId()).
+//                setConfirmTime(now.getTime()).setEventId(r.getEventId()).setTradeComment(tc).
+//                setContractAddress(eve.getContractAddress()).
+//                setUserId(r.getUserId()).setUserType(Short.parseShort(TblDanceUserEventResult.USERTYPE_1_USER)).
+//                 setSeqNo(BcwCommonService.getChainSeqNo(BcwConstant.TYPE_EVENT_COMMENT,r.getId()));
+//
+//
+//        blockChainService.doBlockChain(r, v,"assess");
+
+//        CommonGetReq cgr=new CommonGetReq();
+//        cgr.setContractAddress(eve.getContractAddress());
+//        blockChainService.doBlockChainWithGet(r, v,"assess",cgr,"getAssessment");
+
+    }
+
+    /**
+     * 商家确认
+     * @param eventId
+     */
+    public void founderConfirm(Integer eventId){
+        BcwUser user=BcwUserHolder.getDanceUser();
+        Date now=BcwCommonService.getNow();
+
+        TblDanceEvent e=dao.get(TblDanceEvent.class,eventId);
+        e.setStatus(BcwConstant.STATUS_4_END);
+        e.setSettleDateTime(now);
+        //上链代码
+        dao.update(e);
+
+        dao.bulkUpdate(
+                "update TblDanceUserEventResult " +
+                        " set founderConfirm=? " +
+                        " where eventId=? ",
+                BcwConstant.CONFIRM_1_ED,
+                eventId);
+
+    }
+
+
+    /**
+     * 审批event状态
+     * @param id
+     * @param status
+     * @throws Exception
+     */
+    public void approve(Integer id,String status) throws Exception {
+        TblDanceUserEventRelation t=dao.get(TblDanceUserEventRelation.class,id);
+
+        if(null==t)throw new KeepJoyServiceException("id数据异常");
+
+        if(!BcwConstant.STATUS_0_ING.equals(t.getStatus()))throw new KeepJoyServiceException("数据status异常");
+
+        t.setStatus(status);
+        t.setApproveDateTime(BcwCommonService.getNow());
+        t.setApproveUserId(BcwUserHolder.getDanceUser().getUserId());
+        dao.update(t);
+    }
+
+
+}

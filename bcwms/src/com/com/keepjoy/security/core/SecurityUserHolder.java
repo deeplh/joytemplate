@@ -1,0 +1,93 @@
+package com.keepjoy.security.core;
+
+
+
+
+import javax.servlet.http.HttpServletRequest;
+
+import com.alibaba.fastjson.JSONObject;
+import com.keepjoy.core.context.KeepJoyHttpContext;
+import com.keepjoy.core.exception.KeepJoyServiceException;
+import com.keepjoy.core.util.MyLogUtil;
+import com.keepjoy.core.util.http.CookieUtil;
+import com.keepjoy.security.SecurityConstant;
+import com.keepjoy.security.controller.LoginController;
+import com.keepjoy.security.properties.SecurityProperties;
+import com.keepjoy.security.proxy.RedisSsoProxy;
+import org.apache.commons.lang.StringUtils;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+
+
+/**
+ *
+ */
+public class SecurityUserHolder {
+	private static final Log log=LogFactory.getLog(SecurityUserHolder.class);
+
+	/**
+	 * 获得当前用户
+	 * @return
+	 * @throws Exception 
+	 * @throws Exception 
+	 */
+	public static SecurityUser getCurrentUser(){
+		return getCurrentUser(KeepJoyHttpContext.getRequest());
+	}	
+
+
+	public static SecurityUser getCurrentUser(HttpServletRequest request){
+		SecurityUser cu=null;
+		try {
+			if(SecurityProperties.getSsoMode()) {//sso情况下再使用token
+				String token = request.getParameter(SecurityConstant.TOKEN);
+				if (StringUtils.isEmpty(token)) {
+					token = request.getHeader(SecurityConstant.TOKEN);
+				}
+				if (StringUtils.isEmpty(token)) {
+					token = CookieUtil.getCookieValueByKey(request.getCookies(), SecurityConstant.TOKEN);
+				}
+
+				if (StringUtils.isNotEmpty(token)) {//有token的情况下,一般是remember me模式或者单点模式
+					cu = (SecurityUser) request.getSession().getAttribute(token);
+					if (null == cu) {//从redis里面取一次
+						cu = RedisSsoProxy.getUserFromRedis(token);
+						if (null != cu) {//说明至少有一个子系统登录过了
+							if (StringUtils.isEmpty(SecurityProperties.getSecurityUserClassName())) {
+								throw new KeepJoyServiceException("请配置正确的[securityUserClassName]的路径");
+							}
+							String objStr = cu.getSubSecurityUsers().get(SecurityProperties.getSecurityUserClassName());
+							if (StringUtils.isEmpty(objStr)) {//说明当前子系统还没有登录过,进行登录
+								IUserDetailsService isds = LoginController.getUserDetailsService(cu.getUserName());
+								SecurityUser user = isds.loadUser(cu.getUserName());
+								user.setToken(cu.getToken());
+								RedisSsoProxy.loginByRedis(user, SecurityProperties.getSessionTimeout());
+								cu = user;
+							} else {
+								Class<?> useClass = Class.forName(SecurityProperties.getSecurityUserClassName());
+								Object cuObj = JSONObject.parseObject(objStr, useClass);
+								cu = (SecurityUser) cuObj;
+							}
+						}
+					}
+				}
+			}else{
+				cu=(SecurityUser)request.getSession().getAttribute(SecurityConstant.HTTPSESSION_USER_KEY);
+			}
+		}
+		catch (KeepJoyServiceException e) {
+			throw e;
+		}
+		catch (Exception e) {
+			MyLogUtil.printlnException(log, e, "得到用户信息时出现未知异常");
+			throw new KeepJoyServiceException("得到用户信息时出现未知异常",SecurityConstant.EXCEPTIONCODE_UNABLE_GET_USER);
+		}
+		if(cu==null)throw new KeepJoyServiceException("已超时,请重新登录",SecurityConstant.EXCEPTIONCODE_UNABLE_GET_USER);
+		return cu;
+	}	
+
+
+	
+	
+}

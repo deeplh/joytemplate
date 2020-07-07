@@ -1,0 +1,24 @@
+keepjoy:
+  dataDictMode: true
+  swaggerBasePackage: com.bcwms.controller
+  urlMappings:
+    - /*.action
+keepjoy.security:
+  menuMode: true
+  ssoMode: false
+  sessionTimeout: 600
+  securityUserClassName: com.bcwms.security.BcwUser
+  userDetailsServiceClassName: com.bcwms.security.UserDetailImpl
+  resources:
+    - url: /admin/*
+      security: ALL
+    - url: /admin/login.jsp
+      security: NONE
+keepjoy.weixin:
+  appId: wx1cd9a3945b12cf28
+  appSecret: b2838ee4b895623712302fe9b08b0f7d
+  associateUserClass: com.bcwms.security.weixin.SmallPlatformUserDetailImpl
+
+
+
+

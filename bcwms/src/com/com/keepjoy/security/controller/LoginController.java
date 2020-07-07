@@ -1,0 +1,129 @@
+package com.keepjoy.security.controller;
+
+
+import com.keepjoy.core.context.KeepJoyHttpContext;
+import com.keepjoy.core.controller.IKeepJoyController;
+import com.keepjoy.core.exception.KeepJoyServiceException;
+import com.keepjoy.core.util.MyLogUtil;
+import com.keepjoy.security.SecurityConstant;
+import com.keepjoy.security.properties.SecurityProperties;
+import com.keepjoy.security.proxy.RedisSsoProxy;
+import com.keepjoy.security.core.IUserDetailsService;
+import com.keepjoy.security.core.SecurityUser;
+import com.keepjoy.security.core.impl.UserDetailImpl;
+import org.apache.commons.lang.StringUtils;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+
+import javax.servlet.http.Cookie;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpSession;
+import java.util.HashMap;
+import java.util.UUID;
+
+
+@RestController
+public class LoginController  implements IKeepJoyController {
+
+
+    @RequestMapping(value = "/login",method = {RequestMethod.POST,RequestMethod.GET})
+    public SecurityUser login(@RequestParam(value = "j_username", required = true) String j_username,
+                        @RequestParam(value = "j_password", required = true) String j_password)throws Exception {
+
+        HttpServletRequest request=KeepJoyHttpContext.getRequest();
+        HttpServletResponse response=KeepJoyHttpContext.getResponse();
+        HttpSession session=KeepJoyHttpContext.getSession();
+        SecurityUser user=new SecurityUser();
+        boolean isNeedCookie=false;
+
+        try {
+            MyLogUtil.printlnDebug("开始进入通用登录流程");
+            IUserDetailsService iuds=getUserDetailsService(j_username);
+            user=iuds.loadUser(j_username);
+
+            MyLogUtil.printlnDebug("业务相关["+SecurityProperties.getUserDetailsServiceClassName()+"]登录流程结束");
+
+            if(null==user){
+                throw new RuntimeException("自定义登录流程返回异常,清查看xml配置[user-details-service-class-name]");
+            }
+            if(null==user.getUserId() || StringUtils.isEmpty(user.getUserName())){
+                throw new RuntimeException("自定义登录流程返回返回的user对象中,userId和userName不能为空");
+            }
+            if(!iuds.validatePassword(user, j_password)){
+                throw new KeepJoyServiceException("用户名或密码错误", SecurityConstant.EXCEPTIONCODE_PASSWORD_ERROR);
+            }
+            //失效时间,单位是分钟
+            int expiredTime=SecurityProperties.getSessionTimeout();
+
+            //清除密码
+            user.setPassword(null);
+            //设置token
+            user.setToken(getToken());
+            //sso登录模式
+            if(SecurityProperties.getSsoMode()){
+                RedisSsoProxy.loginByRedis(user,expiredTime);
+                isNeedCookie=true;
+            }else{
+                //以token作为key放一份记录
+//                session.setAttribute(user.getToken(),user);
+                //保证本地session存在
+                session.setAttribute(SecurityConstant.HTTPSESSION_USER_KEY,user);
+                session.setMaxInactiveInterval(expiredTime*60);//单位:秒
+            }
+
+
+            //需要cookie
+            if(isNeedCookie){
+                Cookie cookie = new Cookie(SecurityConstant.TOKEN,user.getToken());
+                cookie.setMaxAge(expiredTime*60);
+                response.addCookie(cookie);
+            }
+
+
+        }
+        catch (Exception e) {
+            throw e;
+        }
+
+        MyLogUtil.printlnDebug("通用登录流程结束");
+        return user;
+    }
+
+    public static IUserDetailsService getUserDetailsService(String username) throws Exception{
+
+
+        //得到登陆流程实现类的实例
+        IUserDetailsService iuds=null;
+        if(StringUtils.isEmpty(SecurityProperties.getUserDetailsServiceClassName())){
+            iuds=new UserDetailImpl();
+        }else{
+            MyLogUtil.printlnDebug("开始进入业务相关["+SecurityProperties.getUserDetailsServiceClassName()+"]登录流程");
+            Object userDetailsServiceObj=Class.forName(SecurityProperties.getUserDetailsServiceClassName()).newInstance();
+            if(null!=userDetailsServiceObj && userDetailsServiceObj instanceof IUserDetailsService){
+                iuds=(IUserDetailsService) userDetailsServiceObj;
+            }else{
+                throw new KeepJoyServiceException("请配置正确的IUserDetailsService实现类的路径");
+            }
+        }
+
+        return iuds;
+
+    }
+
+
+    public static final String getTokenEndMatch(){
+        return "*_"+SecurityConstant.HTTPSESSION_USER_KEY+SecurityProperties.getSecurityUserClassName();
+    }
+
+    public static final String getToken(){
+        return UUID.randomUUID().toString()+"_"+SecurityConstant.HTTPSESSION_USER_KEY+SecurityProperties.getSecurityUserClassName();
+    }
+
+}
+
+
+
